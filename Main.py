@@ -88,7 +88,7 @@ class X11WindowCapture:
                 height = int(height_match.group(1))
 
             self.window_rect = (x, y, width, height)
-            print(f"窗口位置和大小: x={x}, y={y}, width={width}, height={height}")
+            # print(f"窗口位置和大小: x={x}, y={y}, width={width}, height={height}")
             return True
 
         except Exception as e:
