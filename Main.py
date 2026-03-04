@@ -2,6 +2,7 @@
 """
 VRChat 窗口捕获器
 使用 mss 库捕获 Linux 桌面上的 VRChat 窗口
+支持窗口拖动后自动更新位置
 """
 
 import cv2
@@ -16,18 +17,20 @@ from typing import Optional, Tuple
 class X11WindowCapture:
     """X11 窗口捕获类"""
 
-    def __init__(self, window_name: str = "VRChat"):
+    def __init__(self, window_name: str = "VRChat", update_interval: int = 10):
         self.window_name = window_name
         self.window_id: Optional[int] = None
         self.window_rect: Optional[Tuple[int, int, int, int]] = None
         self.sct = mss.mss()
+        self.update_interval = update_interval  # 每 N 帧更新一次窗口位置
+        self.frame_count = 0
 
     def find_window(self) -> bool:
         """查找 VRChat 窗口并获取窗口 ID"""
         try:
-            # 使用 xwininfo 查找窗口
+            # 使用 xwininfo 查找窗口（不使用 -root）
             result = subprocess.run(
-                ['xwininfo', '-name', self.window_name, '-root'],
+                ['xwininfo', '-name', self.window_name],
                 capture_output=True,
                 text=True
             )
@@ -112,6 +115,11 @@ class X11WindowCapture:
 
     def capture(self) -> Optional[np.ndarray]:
         """捕获窗口内容"""
+        # 定期更新窗口位置（支持窗口拖动）
+        self.frame_count += 1
+        if self.frame_count % self.update_interval == 0:
+            self._update_window_position()
+
         if not self.window_id or not self.window_rect:
             if not self.find_window():
                 return None
@@ -133,44 +141,10 @@ class X11WindowCapture:
             print(f"捕获窗口时出错: {e}")
             return None
 
-    def capture_ffmpeg(self) -> Optional[np.ndarray]:
-        """使用 ffmpeg 捕获窗口内容（替代方案）"""
-        if not self.window_id:
-            if not self.find_window():
-                return None
-
-        try:
-            # 使用 ffmpeg 从 X11 捕获窗口
-            import tempfile
-            import os
-
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tmp_path = tmp.name
-
-            # ffmpeg 命令捕获单个帧
-            result = subprocess.run([
-                'ffmpeg',
-                '-f', 'x11grab',
-                '-framerate', '1',
-                '-video_size', f'{self.window_rect[2]}x{self.window_rect[3]}',
-                '-i', f':0.0+{self.window_rect[0]},{self.window_rect[1]}',
-                '-frames:v', '1',
-                '-y',
-                tmp_path
-            ], capture_output=True, text=True)
-
-            if result.returncode == 0:
-                frame = cv2.imread(tmp_path)
-                os.unlink(tmp_path)
-                return frame
-            else:
-                print(f"ffmpeg 捕获失败: {result.stderr}")
-                os.unlink(tmp_path)
-                return None
-
-        except Exception as e:
-            print(f"使用 ffmpeg 捕获时出错: {e}")
-            return None
+    def _update_window_position(self):
+        """更新窗口位置"""
+        if self.window_id:
+            self._get_window_geometry()
 
 
 def main():
@@ -178,8 +152,8 @@ def main():
     print("VRChat 窗口捕获器")
     print("=" * 50)
 
-    # 创建捕获器实例
-    capturer = X11WindowCapture("VRChat")
+    # 创建捕获器实例（每 10 帧更新一次窗口位置）
+    capturer = X11WindowCapture("VRChat", update_interval=10)
 
     # 查找窗口
     if not capturer.find_window():
