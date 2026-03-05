@@ -2,24 +2,22 @@ package vrchat.FantasyNetwork;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.io.BufferedInputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 
 public class WindowCapture {
     private volatile boolean running = false;
     private String windowTitle;
     private Rectangle windowBounds;
-    private Robot robot;
     private FrameCallback frameCallback;
+    private String windowId;
 
     public interface FrameCallback {
         void onFrame(BufferedImage frame);
     }
 
     public WindowCapture() {
-        try {
-            robot = new Robot();
-        } catch (AWTException e) {
-            e.printStackTrace();
-        }
     }
 
     public void setWindowTitle(String title) {
@@ -36,6 +34,7 @@ public class WindowCapture {
         }
 
         running = true;
+        findWindow();
         new Thread(this::captureLoop).start();
     }
 
@@ -44,18 +43,31 @@ public class WindowCapture {
     }
 
     private void captureLoop() {
-        while (running) {
-            try {
-                if (findWindow()) {
-                    BufferedImage frame = robot.createScreenCapture(windowBounds);
-                    if (frameCallback != null) {
-                        frameCallback.onFrame(frame);
+        try {
+            while (running) {
+                if (windowId != null) {
+                    try {
+                        ProcessBuilder pb = new ProcessBuilder(
+                            "maim", "--window", windowId, "--format", "png", "/dev/stdout"
+                        );
+                        Process process = pb.start();
+                        
+                        java.io.InputStream inputStream = process.getInputStream();
+                        BufferedImage image = javax.imageio.ImageIO.read(inputStream);
+                        
+                        process.waitFor();
+                        
+                        if (image != null && frameCallback != null) {
+                            frameCallback.onFrame(image);
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
                     }
                 }
                 Thread.sleep(33);
-            } catch (Exception e) {
-                e.printStackTrace();
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
@@ -87,6 +99,7 @@ public class WindowCapture {
             if (exitCode == 0 && !windowIds.isEmpty()) {
                 Rectangle bestBounds = null;
                 int maxArea = 0;
+                String bestWindowId = null;
                 
                 for (String windowId : windowIds) {
                     try {
@@ -124,6 +137,7 @@ public class WindowCapture {
                         if (area > maxArea && area > 100) {
                             maxArea = area;
                             bestBounds = new Rectangle(x, y, width, height);
+                            bestWindowId = windowId;
                         }
                     } catch (Exception e) {
                         // 忽略单个窗口的错误
@@ -132,7 +146,8 @@ public class WindowCapture {
                 
                 if (bestBounds != null) {
                     windowBounds = bestBounds;
-                    System.out.println("Found window with largest area: " + windowBounds);
+                    windowId = bestWindowId;
+                    System.out.println("Found window with largest area: " + windowBounds + " (ID: " + windowId + ")");
                     return true;
                 }
             }
