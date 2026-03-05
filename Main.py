@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-VRChat 窗口捕获器
-使用 mss 库捕获 Linux 桌面上的 VRChat 窗口
-支持窗口拖动后自动更新位置
-支持自动钓鱼功能
-"""
-
 import cv2
 import numpy as np
 import subprocess
@@ -13,8 +5,56 @@ import re
 import time
 import mss
 import os
-import pyautogui
 from typing import Optional, Tuple
+
+
+def apply_gamma_correction(image: np.ndarray, gamma: float = 1.5) -> np.ndarray:
+    """应用伽马校正增强对比度"""
+    # 构建查找表
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255
+                     for i in np.arange(0, 256)]).astype("uint8")
+
+    # 应用查找表
+    return cv2.LUT(image, table)
+
+
+def to_grayscale_with_gamma(image: np.ndarray, gamma: float = 1.5) -> np.ndarray:
+    """转换为灰度并应用伽马校正"""
+    # 转换为灰度
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # 应用伽马校正
+    return apply_gamma_correction(gray, gamma)
+
+
+class KalmanFilter:
+    """卡尔曼滤波器，用于平滑跟踪"""
+
+    def __init__(self):
+        self.kalman = cv2.KalmanFilter(4, 2)
+        # 状态向量: [x, y, vx, vy]
+        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0],
+                                                  [0, 1, 0, 0]], np.float32)
+        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0],
+                                                [0, 1, 0, 1],
+                                                [0, 0, 1, 0],
+                                                [0, 0, 0, 1]], np.float32)
+        self.kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.1
+        self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+        self.kalman.errorCovPost = np.eye(4, dtype=np.float32) * 1
+
+    def predict(self):
+        """预测下一帧位置"""
+        return self.kalman.predict()
+
+    def update(self, measurement):
+        """更新滤波器"""
+        self.kalman.correct(measurement)
+
+    def get_position(self):
+        """获取当前位置 - 返回 (x, y) 元组"""
+        pos = self.kalman.statePost[:2]
+        return (int(pos[0, 0]), int(pos[1, 0]))
 
 
 class FishAutoBot:
@@ -28,7 +68,18 @@ class FishAutoBot:
         self.state_start_time = 0
         self.window_rect = None  # 窗口位置信息
         self.window_id = None  # 窗口 ID
+
+        # 卡尔曼滤波器
+        self.bar_kalman = KalmanFilter()  # 白色条跟踪
+        self.fish_kalman = KalmanFilter()  # 小鱼跟踪
+        self.kalman_initialized = False
+
+        # 小鱼模板
+        self.fish_templates = []
+
+        # 加载模板
         self.load_templates()
+        self.load_fish_templates()
 
     def set_window_rect(self, rect: Tuple[int, int, int, int]):
         """设置窗口位置信息"""
@@ -39,7 +90,7 @@ class FishAutoBot:
         self.window_id = window_id
 
     def load_templates(self):
-        """加载模板图片"""
+        """加载模板图片 - 应用灰度和伽马校正"""
         for state_dir in range(1, 6):  # 1-5
             state_path = os.path.join(self.img_dir, str(state_dir))
             if os.path.isdir(state_path):
@@ -48,43 +99,100 @@ class FishAutoBot:
                 for filename in os.listdir(state_path):
                     if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                         filepath = os.path.join(state_path, filename)
+                        # 读取彩色图片
                         template = cv2.imread(filepath, cv2.IMREAD_COLOR)
                         if template is not None:
-                            self.templates[state_dir].append(template)
-                            print(f"加载模板: 状态{state_dir}/{filename}")
+                            # 转换为灰度并应用伽马校正
+                            template_gray = to_grayscale_with_gamma(template, gamma=1.5)
+                            self.templates[state_dir].append(template_gray)
+                            print(f"加载模板: 状态{state_dir}/{filename} (灰度+伽马)")
                 print(f"状态{state_dir} 共加载 {len(self.templates[state_dir])} 个模板")
             else:
                 print(f"警告: 找不到状态目录 {state_path}")
 
+    def load_fish_templates(self):
+        """加载小鱼模板图片 - 应用灰度和伽马校正"""
+        fish_img_dir = os.path.join(self.img_dir, "fish_img")
+        if os.path.isdir(fish_img_dir):
+            # 加载该目录下的所有图片
+            for filename in os.listdir(fish_img_dir):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    filepath = os.path.join(fish_img_dir, filename)
+                    # 读取彩色图片
+                    template = cv2.imread(filepath, cv2.IMREAD_COLOR)
+                    if template is not None:
+                        # 转换为灰度并应用伽马校正
+                        template_gray = to_grayscale_with_gamma(template, gamma=1.5)
+                        self.fish_templates.append(template_gray)
+                        print(f"加载小鱼模板: {filename} (灰度+伽马)")
+            print(f"小鱼模板共加载 {len(self.fish_templates)} 个")
+        else:
+            print(f"警告: 找不到小鱼模板目录 {fish_img_dir}")
+
     def detect_state(self, frame: np.ndarray) -> Optional[int]:
-        """检测当前状态"""
+        """检测当前状态 - 使用灰度+伽马校正的模板匹配"""
+        # 转换为灰度并应用伽马校正
+        frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
         best_match = None
         best_score = 0
-        threshold = 0.5  # 进一步降低阈值
+        threshold = 0.2  # 降低阈值
         state_scores = {}
+
+        frame_height, frame_width = frame_gray.shape[:2]
 
         for state, templates in self.templates.items():
             if not templates:
                 continue
 
-            # 对该状态的所有模板进行匹配，取最高分数
-            state_best_score = 0
+            # 对该状态的所有模板进行匹配
+            state_scores_list = []
             for template in templates:
-                result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-                if max_val > state_best_score:
-                    state_best_score = max_val
+                template_height, template_width = template.shape[:2]
 
-            state_scores[state] = state_best_score
+                # 跳过大于图像的模板
+                if template_height > frame_height or template_width > frame_width:
+                    continue
+
+                # 检查是否是小模板（小于窗口的70%）
+                is_small_template = (template_height < frame_height * 0.7 and 
+                                    template_width < frame_width * 0.7)
+
+                if is_small_template:
+                    # 小模板：在整个窗口中搜索
+                    result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                    # 检查最佳匹配位置是否合理（不在边缘）
+                    x, y = max_loc
+                    margin = 10
+                    if (x > margin and x < frame_width - template_width - margin and
+                        y > margin and y < frame_height - template_height - margin):
+                        state_scores_list.append(max_val)
+                else:
+                    # 大模板：直接匹配
+                    result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                    state_scores_list.append(max_val)
+
+            if not state_scores_list:
+                continue
+
+            # 使用平均值和最大值的加权和
+            avg_score = sum(state_scores_list) / len(state_scores_list)
+            max_score = max(state_scores_list)
+            weighted_score = (avg_score * 0.5 + max_score * 0.5)  # 平衡权重
+
+            state_scores[state] = weighted_score
 
             # 更新全局最佳匹配
-            if state_best_score > best_score:
-                best_score = state_best_score
+            if weighted_score > best_score:
+                best_score = weighted_score
                 best_match = state
 
         # 显示所有状态的匹配分数
         scores_str = ", ".join([f"状态{k}:{v:.3f}" for k, v in sorted(state_scores.items())])
-        print(f"匹配分数: {scores_str}")
+        print(f"模板匹配: {scores_str}")
 
         if best_score >= threshold:
             print(f"检测到状态: {best_match}")
@@ -93,7 +201,7 @@ class FishAutoBot:
             print(f"未检测到状态，最佳匹配分数: {best_score:.3f}")
             return None
 
-    def handle_state(self, state: int):
+    def handle_state(self, state: int, frame: np.ndarray):
         """根据状态执行操作，严格按照1->2->3->4->5的顺序"""
         current_time = time.time()
 
@@ -122,8 +230,8 @@ class FishAutoBot:
                 self.expected_state = 4  # 下一个预期状态
 
             elif state == 4:
-                # 图4：控制白色条保持中间
-                print("  状态4: 正在收线 - 保持平衡")
+                # 图4：控制白色条保持在小鱼图片内
+                print("  状态4: 正在收线 - 控制白条位置")
                 self.state_start_time = current_time
                 self.expected_state = 5  # 下一个预期状态
 
@@ -136,9 +244,43 @@ class FishAutoBot:
                 self.expected_state = 1  # 循环回状态1
 
         elif state == 4 and self.expected_state == 4:
-            # 状态4需要持续操作
-            if current_time - self.state_start_time > 0.5:
-                self.click_left()
+            # 状态4需要持续控制白色条位置 - 智能控制
+            if current_time - self.state_start_time > 0.05:  # 更快的响应速度
+                # 检测白色条和小鱼位置
+                bar_pos = self.detect_white_bar(frame)
+                fish_pos = self.detect_fish(frame)
+
+                if bar_pos and fish_pos:
+                    # 获取小鱼和白色条的垂直位置
+                    fish_center_y = fish_pos[1] + fish_pos[3] // 2
+                    bar_center_y = bar_pos[1] + bar_pos[3] // 2
+
+                    # 计算垂直距离
+                    distance = fish_center_y - bar_center_y
+
+                    print(f"  小鱼相对位置: {distance}px")
+
+                    # 根据相对位置决定操作
+                    if distance < -10:  # 小鱼在白色条上方10像素以上
+                        # 按住鼠标让小鱼下降
+                        print("  小鱼在上方 - 按住")
+                        subprocess.run(['xdotool', 'mousedown', '1'], capture_output=True)
+                    elif distance > 10:  # 小鱼在白色条下方10像素以上
+                        # 松开鼠标让小鱼上升
+                        print("  小鱼在下方 - 松开")
+                        subprocess.run(['xdotool', 'mouseup', '1'], capture_output=True)
+                    else:  # 小鱼在白色条附近
+                        # 保持当前状态
+                        print("  小鱼在范围内 - 保持")
+
+                    # 自动截图学习（降低频率，避免太多截图）
+                    if int(current_time) % 2 == 0:  # 每2秒截图一次
+                        self.auto_capture(frame, 4)
+                else:
+                    # 无法检测到目标，使用默认策略
+                    print("  无法检测目标 - 使用默认策略")
+                    self.click_left()
+
                 self.state_start_time = current_time
 
         else:
@@ -163,6 +305,137 @@ class FishAutoBot:
             print("点击完成")
         except Exception as e:
             print(f"点击出错: {e}")
+
+    def detect_white_bar(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """检测白色条的位置 - 使用灰度+伽马校正和卡尔曼滤波"""
+        try:
+            # 转换为灰度并应用伽马校正
+            gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
+            # 二值化 - 提取白色区域（高亮度）
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+
+            # 查找轮廓
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # 找到最大的白色区域（白色条）
+            if contours:
+                # 筛选符合条件的轮廓（宽度大、高度小）
+                valid_contours = []
+                for contour in contours:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    if w > 200 and h < 10:
+                        valid_contours.append((contour, (x, y, w, h)))
+
+                if valid_contours:
+                    # 选择面积最大的
+                    largest_contour, (x, y, w, h) = max(valid_contours, key=lambda c: cv2.contourArea(c[0]))
+
+                    # 使用卡尔曼滤波平滑位置
+                    center_x = x + w // 2
+                    center_y = y + h // 2
+                    measurement = np.array([[center_x], [center_y]], dtype=np.float32)
+
+                    if not self.kalman_initialized:
+                        # 初始化卡尔曼滤波器
+                        self.bar_kalman.kalman.statePost = np.array([[center_x], [center_y], [0], [0]], dtype=np.float32)
+                        self.kalman_initialized = True
+                    else:
+                        # 更新卡尔曼滤波器
+                        self.bar_kalman.predict()
+                        self.bar_kalman.update(measurement)
+
+                    # 获取滤波后的位置
+                    filtered_x, filtered_y = self.bar_kalman.get_position()
+                    filtered_x = int(filtered_x - w // 2)
+                    filtered_y = int(filtered_y - h // 2)
+
+                    print(f"  检测到白色条: x={filtered_x}, y={filtered_y}, w={w}, h={h}")
+                    return (filtered_x, filtered_y, w, h)
+
+            print("  未检测到白色条")
+            return None
+        except Exception as e:
+            print(f"检测白色条出错: {e}")
+            return None
+
+    def detect_fish(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """检测小鱼的位置 - 使用灰度+伽马校正的模板匹配"""
+        try:
+            if not self.fish_templates:
+                print("  未加载小鱼模板，无法检测")
+                return None
+
+            # 转换为灰度并应用伽马校正
+            frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
+            best_match = None
+
+            best_score = 0
+
+            threshold = 0.2  # 降低阈值
+
+            frame_height, frame_width = frame_gray.shape[:2]
+
+            # 对每个小鱼模板进行匹配
+            for template in self.fish_templates:
+                template_height, template_width = template.shape[:2]
+
+                # 检查是否是小模板（小于窗口的70%）
+                is_small_template = (template_height < frame_height * 0.7 and 
+                                    template_width < frame_width * 0.7)
+
+                if is_small_template:
+                    # 小模板：在整个窗口中搜索
+                    result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                    # 检查最佳匹配位置是否合理（不在边缘）
+                    x, y = max_loc
+                    margin = 10
+                    if (x > margin and x < frame_width - template_width - margin and
+                        y > margin and y < frame_height - template_height - margin):
+                        if max_val > best_score:
+                            best_score = max_val
+                            best_match = (x, y, template_width, template_height)
+
+            if best_match and best_score >= threshold:
+                x, y, w, h = best_match
+                print(f"  检测到小鱼: x={x}, y={y}, w={w}, h={h}, 匹配分数={best_score:.3f}")
+                return (x, y, w, h)
+            else:
+                print(f"  未检测到小鱼，最佳匹配分数: {best_score:.3f}")
+                return None
+
+        except Exception as e:
+            print(f"检测小鱼出错: {e}")
+            return None
+
+    def is_fish_aligned(self, fish_pos: Tuple[int, int, int, int], bar_pos: Tuple[int, int, int, int]) -> bool:
+        """判断小鱼是否在白色条区域内"""
+        fx, fy, fw, fh = fish_pos
+        bx, by, bw, bh = bar_pos
+
+        # 小鱼的垂直中心
+        fish_center_y = fy + fh // 2
+
+        # 白色条的垂直范围
+        bar_top = by
+        bar_bottom = by + bh
+
+        # 判断小鱼是否在白色条的垂直范围内
+        return bar_top <= fish_center_y <= bar_bottom
+
+    def auto_capture(self, frame: np.ndarray, state: int):
+        """自动截图并保存到对应文件夹"""
+        try:
+            timestamp = int(time.time() * 1000)
+            filename = f"auto_{timestamp}.png"
+            filepath = os.path.join(self.img_dir, str(state), filename)
+            cv2.imwrite(filepath, frame)
+            print(f"自动截图保存: {filepath}")
+        except Exception as e:
+            print(f"自动截图出错: {e}")
 
 
 class X11WindowCapture:
@@ -318,6 +591,7 @@ def main():
         print("\n安装必要的工具:")
         print("sudo apt install x11-utils xdotool")
         print("pip install mss opencv-python")
+        print("\n数据收集命令: python collect_data.py")
         return
 
     # 设置窗口位置信息给钓鱼机器人
@@ -338,15 +612,66 @@ def main():
             frame = capturer.capture()
 
             if frame is not None:
+                # 创建用于绘制的副本（彩色图）
+                display_frame = frame.copy()
+
                 # 检测当前状态
                 state = fish_bot.detect_state(frame)
 
                 if state:
-                    # 处理状态
-                    fish_bot.handle_state(state)
+                    # 处理状态，传递 frame 用于智能检测
+                    fish_bot.handle_state(state, frame)
+
+                    # 绘制检测结果
+                    # 检测小鱼
+                    fish_pos = fish_bot.detect_fish(frame)
+                    if fish_pos:
+                        x, y, w, h = fish_pos
+                        # 绘制小鱼边界框（绿色）
+                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        cv2.putText(display_frame, "FISH", (x, y - 10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                    # 检测白色条
+                    bar_pos = fish_bot.detect_white_bar(frame)
+                    if bar_pos:
+                        x, y, w, h = bar_pos
+                        # 绘制白色条边界框（蓝色）
+                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                        cv2.putText(display_frame, "BAR", (x, y - 10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+                    # 状态4时绘制相对位置
+                    if state == 4 and fish_pos and bar_pos:
+                        fish_center_y = fish_pos[1] + fish_pos[3] // 2
+                        bar_center_y = bar_pos[1] + bar_pos[3] // 2
+                        distance = fish_center_y - bar_center_y
+
+                        # 绘制中心线（白色条中心）
+                        cv2.line(display_frame, (bar_pos[0], bar_center_y), 
+                                (bar_pos[0] + bar_pos[2], bar_center_y), (255, 0, 0), 1)
+                        
+                        # 绘制小鱼中心线
+                        cv2.line(display_frame, (fish_pos[0], fish_center_y), 
+                                (fish_pos[0] + fish_pos[2], fish_center_y), (0, 255, 0), 1)
+
+                        # 绘制相对距离
+                        mid_x = (fish_pos[0] + bar_pos[0] + bar_pos[2]) // 2
+                        mid_y = (fish_center_y + bar_center_y) // 2
+                        direction = "UP" if distance < -10 else "DOWN" if distance > 10 else "OK"
+                        cv2.putText(display_frame, f"{direction} {distance:.1f}px", 
+                                   (mid_x - 50, mid_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                    # 绘制当前状态信息
+                    cv2.putText(display_frame, f"State: {state}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                else:
+                    # 未检测到状态，显示提示
+                    cv2.putText(display_frame, "No State Detected", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
                 # 显示捕获的图像
-                cv2.imshow('VRChat Capture', frame)
+                cv2.imshow('VRChat Capture', display_frame)
 
                 # 按 'q' 键退出
                 if cv2.waitKey(1) & 0xFF == ord('q'):
