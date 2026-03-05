@@ -1,3 +1,6 @@
-## Vrchat自动钓鱼
+## Linux Only!
 
-不支持windows！仅linux x11环境下运行（理论支持wayland）
+安装虚拟环境`sudo apt install python3.12-venv`
+创建虚拟环境`python3 -m venv vrc`
+激活虚拟环境`source vrc/bin/activate`
+安装过依赖`pip install -r requirements.txt`

@@ -1,0 +1,126 @@
+"""
+输入控制模块
+============
+PostMessage — Win32 消息投递, 不移动光标不抢焦点。
+摇头功能通过 VRChat OSC API 发送 LookLeft/LookRight。
+"""
+
+import ctypes
+import ctypes.wintypes
+import time
+
+from utils.logger import log
+
+user32 = ctypes.windll.user32
+
+WM_LBUTTONDOWN  = 0x0201
+WM_LBUTTONUP    = 0x0202
+WM_ACTIVATE     = 0x0006
+WA_ACTIVE       = 1
+MK_LBUTTON      = 0x0001
+
+
+def _MAKELPARAM(x: int, y: int) -> int:
+    return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+
+
+class InputController:
+    """PostMessage 鼠标控制器 + OSC 摇头"""
+
+    def __init__(self, window_mgr):
+        self.wm = window_mgr
+        self.mouse_is_down = False
+        self._click_x = 400
+        self._click_y = 400
+
+    # ────────────────── 内部工具 ──────────────────
+
+    def _update_click_pos(self):
+        region = self.wm.get_region()
+        if region:
+            self._click_x = region[2] // 2
+            self._click_y = region[3] // 2
+
+    def _post(self, msg: int, wparam: int):
+        hwnd = self.wm.hwnd
+        if not hwnd:
+            return False
+        lparam = _MAKELPARAM(self._click_x, self._click_y)
+        return bool(user32.PostMessageW(hwnd, msg, wparam, lparam))
+
+    # ────────────────── 聚焦 ──────────────────
+
+    def focus_game(self) -> bool:
+        ok = self.wm.focus()
+        if ok:
+            self._update_click_pos()
+        else:
+            log.warning("无法聚焦 VRChat 窗口")
+        return ok
+
+    def move_to_game_center(self):
+        self._update_click_pos()
+
+    def ensure_cursor_in_game(self):
+        pass
+
+    # ────────────────── 鼠标操作 ──────────────────
+
+    def click(self, focus: bool = False):
+        if focus:
+            self.focus_game()
+            time.sleep(0.1)
+        self._update_click_pos()
+        self._post(WM_LBUTTONDOWN, MK_LBUTTON)
+        time.sleep(0.06)
+        self._post(WM_LBUTTONUP, 0)
+
+    def click_rapid(self):
+        self._post(WM_LBUTTONDOWN, MK_LBUTTON)
+        time.sleep(0.02)
+        self._post(WM_LBUTTONUP, 0)
+
+    def mouse_down(self):
+        if not self.mouse_is_down:
+            self._post(WM_LBUTTONDOWN, MK_LBUTTON)
+            self.mouse_is_down = True
+
+    def mouse_up(self):
+        if self.mouse_is_down:
+            self._post(WM_LBUTTONUP, 0)
+            self.mouse_is_down = False
+
+    # ────────────────── 摇头 (OSC) ──────────────────
+
+    def shake_head(self):
+        """抛竿前摇头: 右→左，对称两步，始终通过 OSC。"""
+        import config as _cfg
+        t = getattr(_cfg, "SHAKE_HEAD_TIME", 0.01)
+        if t <= 0:
+            return
+        try:
+            from pythonosc import udp_client
+            osc = udp_client.SimpleUDPClient("127.0.0.1", 9000)
+        except Exception:
+            return
+        try:
+            osc.send_message("/input/LookRight", 1)
+            time.sleep(t)
+            osc.send_message("/input/LookRight", 0)
+            time.sleep(0.05)
+
+            osc.send_message("/input/LookLeft", 1)
+            time.sleep(t)
+            osc.send_message("/input/LookLeft", 0)
+            time.sleep(0.05)
+        except Exception:
+            pass
+
+    # ────────────────── 安全 ──────────────────
+
+    def safe_release(self):
+        try:
+            self._post(WM_LBUTTONUP, 0)
+        except Exception:
+            pass
+        self.mouse_is_down = False

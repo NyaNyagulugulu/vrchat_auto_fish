@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+build/
+dist/
+fish.spec
+debug/
+imitation/data/
+imitation/policy.pt
+
+yolo/dataset/images/
+yolo/dataset/labels/
+
+yolo/runs/fish_detect/weights/epoch*.pt
+yolo/runs/fish_detect/weights/last.pt
+
+yolo26n.pt
+yolov8n.pt
+
+*.whl
+patch_*.zip
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# 用户个人设置 (每人不同)
+settings.json
