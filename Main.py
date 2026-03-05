@@ -76,10 +76,14 @@ class FishAutoBot:
 
         # 小鱼模板
         self.fish_templates = []
+        
+        # 白色条模板
+        self.bar_templates = []
 
         # 加载模板
         self.load_templates()
         self.load_fish_templates()
+        self.load_bar_templates()
 
     def set_window_rect(self, rect: Tuple[int, int, int, int]):
         """设置窗口位置信息"""
@@ -111,7 +115,7 @@ class FishAutoBot:
                 print(f"警告: 找不到状态目录 {state_path}")
 
     def load_fish_templates(self):
-        """加载小鱼模板图片 - 应用灰度和伽马校正"""
+        """加载小鱼模板图片 - 使用边缘检测提取轮廓特征"""
         fish_img_dir = os.path.join(self.img_dir, "fish_img")
         if os.path.isdir(fish_img_dir):
             # 加载该目录下的所有图片
@@ -123,11 +127,32 @@ class FishAutoBot:
                     if template is not None:
                         # 转换为灰度并应用伽马校正
                         template_gray = to_grayscale_with_gamma(template, gamma=1.5)
-                        self.fish_templates.append(template_gray)
-                        print(f"加载小鱼模板: {filename} (灰度+伽马)")
+                        # 使用Canny边缘检测提取轮廓（突出鱼的黑色轮廓）
+                        template_edges = cv2.Canny(template_gray, 50, 150)
+                        self.fish_templates.append(template_edges)
+                        print(f"加载小鱼模板: {filename} (边缘检测)")
             print(f"小鱼模板共加载 {len(self.fish_templates)} 个")
         else:
             print(f"警告: 找不到小鱼模板目录 {fish_img_dir}")
+
+    def load_bar_templates(self):
+        """加载白色条模板图片 - 使用灰度和伽马校正"""
+        bar_img_dir = os.path.join(self.img_dir, "bar")
+        if os.path.isdir(bar_img_dir):
+            # 加载该目录下的所有图片
+            for filename in os.listdir(bar_img_dir):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    filepath = os.path.join(bar_img_dir, filename)
+                    # 读取彩色图片
+                    template = cv2.imread(filepath, cv2.IMREAD_COLOR)
+                    if template is not None:
+                        # 转换为灰度并应用伽马校正
+                        template_gray = to_grayscale_with_gamma(template, gamma=1.5)
+                        self.bar_templates.append(template_gray)
+                        print(f"加载白色条模板: {filename} (灰度+伽马)")
+            print(f"白色条模板共加载 {len(self.bar_templates)} 个")
+        else:
+            print(f"警告: 找不到白色条模板目录 {bar_img_dir}")
 
     def detect_state(self, frame: np.ndarray) -> Optional[int]:
         """检测当前状态 - 使用灰度+伽马校正的模板匹配"""
@@ -202,7 +227,7 @@ class FishAutoBot:
             return None
 
     def handle_state(self, state: int, frame: np.ndarray):
-        """根据状态执行操作，严格按照1->2->3->4->5的顺序"""
+        """根据状态执行操作，严格按照1->2->3的顺序"""
         current_time = time.time()
 
         # 更新当前检测到的状态
@@ -228,14 +253,6 @@ class FishAutoBot:
                 # 图3：控制白色条保持在小鱼图片内
                 print("  状态3: 正在收线 - 控制白条位置")
                 self.state_start_time = current_time
-                self.expected_state = 4  # 下一个预期状态
-
-            elif state == 4:
-                # 图4：等待1秒后左键点击，循环
-                print("  状态4: 鱼钓上 - 等待1秒...")
-                time.sleep(1)
-                self.click_left()
-                print("  循环开始...")
                 self.expected_state = 1  # 循环回状态1
 
         elif state == 3 and self.expected_state == 3:
@@ -302,7 +319,74 @@ class FishAutoBot:
             print(f"点击出错: {e}")
 
     def detect_white_bar(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """检测白色条的位置 - 使用灰度+伽马校正和卡尔曼滤波"""
+        """检测白色条的位置 - 使用模板匹配"""
+        try:
+            if not self.bar_templates:
+                print("  未加载白色条模板，使用边缘检测")
+                return self._detect_white_bar_by_edges(frame)
+
+            # 转换为灰度并应用伽马校正
+            frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
+            # 对每个白色条模板进行匹配
+            best_match = None
+            best_score = 0
+            threshold = 0.3  # 降低阈值，更容易检测到白色条
+            frame_height, frame_width = frame_gray.shape[:2]
+
+            for template in self.bar_templates:
+                template_height, template_width = template.shape[:2]
+
+                # 跳过大于图像的模板
+                if template_height > frame_height or template_width > frame_width:
+                    continue
+
+                # 使用模板匹配
+                result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 检查最佳匹配位置是否合理（不在边缘）
+                x, y = max_loc
+                margin = 10
+                if (x > margin and x < frame_width - template_width - margin and
+                    y > margin and y < frame_height - template_height - margin):
+                    if max_val > best_score:
+                        best_score = max_val
+                        best_match = (x, y, template_width, template_height)
+
+            if best_match and best_score >= threshold:
+                x, y, w, h = best_match
+                
+                # 使用卡尔曼滤波平滑位置
+                center_x = x + w // 2
+                center_y = y + h // 2
+                measurement = np.array([[center_x], [center_y]], dtype=np.float32)
+
+                if not self.kalman_initialized:
+                    # 初始化卡尔曼滤波器
+                    self.bar_kalman.kalman.statePost = np.array([[center_x], [center_y], [0], [0]], dtype=np.float32)
+                    self.kalman_initialized = True
+                else:
+                    # 更新卡尔曼滤波器
+                    self.bar_kalman.predict()
+                    self.bar_kalman.update(measurement)
+
+                # 获取滤波后的位置
+                filtered_x, filtered_y = self.bar_kalman.get_position()
+                filtered_x = int(filtered_x - w // 2)
+                filtered_y = int(filtered_y - h // 2)
+
+                print(f"  检测到白色条（模板匹配）: x={filtered_x}, y={filtered_y}, w={w}, h={h}, 分数={best_score:.3f}")
+                return (filtered_x, filtered_y, w, h)
+
+            print(f"  未检测到白色条（模板匹配），最佳匹配分数: {best_score:.3f}")
+            return None
+        except Exception as e:
+            print(f"检测白色条出错: {e}")
+            return None
+
+    def _detect_white_bar_by_edges(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """备用方法：使用边缘检测白色条"""
         try:
             # 转换为灰度并应用伽马校正
             gray = to_grayscale_with_gamma(frame, gamma=1.5)
@@ -370,104 +454,79 @@ class FishAutoBot:
             return None
 
     def detect_fish(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-
-            """检测小鱼的位置 - 使用灰度+伽马校正的模板匹配"""
-
-            try:
-
-                if not self.fish_templates:
-
-                    print("  未加载小鱼模板，无法检测")
-
-                    return None
-
-    
-
-                # 转换为灰度并应用伽马校正
-
-                frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
-
-    
-
-                best_match = None
-
-    
-
-                best_score = 0
-
-    
-
-                threshold = 0.4  # 降低阈值，更容易检测到小鱼
-
-    
-
-                frame_height, frame_width = frame_gray.shape[:2]
-
-    
-
-                # 对每个小鱼模板进行匹配
-
-                for template in self.fish_templates:
-
-                    template_height, template_width = template.shape[:2]
-
-    
-
-                    # 跳过大于图像的模板
-
-                    if template_height > frame_height or template_width > frame_width:
-
-                        continue
-
-    
-
-                    # 小模板：在整个窗口中搜索
-
-                    result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
-
-                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-
-    
-
-                    # 检查最佳匹配位置是否合理（不在边缘）
-
-                    x, y = max_loc
-
-                    margin = 10
-
-                    if (x > margin and x < frame_width - template_width - margin and
-
-                        y > margin and y < frame_height - template_height - margin):
-
-                        if max_val > best_score:
-
-                            best_score = max_val
-
-                            best_match = (x, y, template_width, template_height)
-
-    
-
-                if best_match and best_score >= threshold:
-
-                    x, y, w, h = best_match
-
-                    print(f"  检测到小鱼: x={x}, y={y}, w={w}, h={h}, 匹配分数={best_score:.3f}")
-
-                    return (x, y, w, h)
-
-                else:
-
-                    print(f"  未检测到小鱼，最佳匹配分数: {best_score:.3f}")
-
-                    return None
-
-    
-
-            except Exception as e:
-
-                print(f"检测小鱼出错: {e}")
-
+        """检测小鱼的位置 - 使用边缘检测和轮廓匹配"""
+        try:
+            if not self.fish_templates:
+                print("  未加载小鱼模板，无法检测")
                 return None
+
+            # 转换为灰度并应用伽马校正
+            frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
+            # 使用Canny边缘检测提取轮廓（突出鱼的黑色轮廓）
+            edges = cv2.Canny(frame_gray, 50, 150)
+
+            frame_height, frame_width = edges.shape[:2]
+
+            # 限制搜索区域：只在白色条附近搜索（避免云上、地上误检）
+            # 如果有白色条位置，限制搜索区域
+            search_region = edges
+            search_offset_y = 0
+
+            if hasattr(self, 'bar_kalman') and self.kalman_initialized:
+                # 获取白色条的位置
+                bar_pos = self.bar_kalman.get_position()
+                bar_y = bar_pos[1]
+                # 只搜索白色条上下150像素范围内（扩大范围）
+                search_y_start = max(0, bar_y - 150)
+                search_y_end = min(frame_height, bar_y + 150)
+                search_region = edges[search_y_start:search_y_end, :]
+                search_offset_y = search_y_start
+                print(f"  限制搜索区域: y={search_y_start}-{search_y_end} (白色条y={bar_y})")
+            else:
+                print(f"  无白色条位置，搜索全屏")
+
+            # 对每个小鱼模板进行匹配
+            best_match = None
+            best_score = 0
+            threshold = 0.25  # 进一步降低阈值
+
+            for template in self.fish_templates:
+                # 对模板也进行边缘检测
+                template_edges = cv2.Canny(template, 50, 150)
+
+                template_height, template_width = template_edges.shape[:2]
+
+                # 跳过大于图像的模板
+                search_height, search_width = search_region.shape[:2]
+                if template_height > search_height or template_width > search_width:
+                    continue
+
+                # 使用边缘图像进行模板匹配
+                result = cv2.matchTemplate(search_region, template_edges, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                # 检查最佳匹配位置是否合理（不在边缘）
+                x, y = max_loc
+                margin = 10
+                if (x > margin and x < search_width - template_width - margin and
+                    y > margin and y < search_height - template_height - margin):
+                    if max_val > best_score:
+                        best_score = max_val
+                        # 调整y坐标（加上搜索区域偏移）
+                        best_match = (x, y + search_offset_y, template_width, template_height)
+                        print(f"  候选匹配: x={x}, y={y+search_offset_y}, 分数={max_val:.3f}")
+
+            if best_match and best_score >= threshold:
+                x, y, w, h = best_match
+                print(f"  检测到小鱼, 最佳匹配分数: {best_score:.3f}")
+                return (x, y, w, h)
+
+            print(f"  未检测到小鱼, 最佳匹配分数: {best_score:.3f}")
+            return None
+        except Exception as e:
+            print(f"检测小鱼出错: {e}")
+            return None
 
     def is_fish_aligned(self, fish_pos: Tuple[int, int, int, int], bar_pos: Tuple[int, int, int, int]) -> bool:
         """判断小鱼是否在白色条区域内"""
@@ -732,8 +791,8 @@ def main():
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
                         print(f"  [未绘制] 白色条未检测到")
 
-                    # 状态4时绘制相对位置
-                    if state == 4 and fish_pos and bar_pos:
+                    # 状态3时绘制相对位置
+                    if state == 3 and fish_pos and bar_pos:
                         fish_center_y = fish_pos[1] + fish_pos[3] // 2
                         bar_center_y = bar_pos[1] + bar_pos[3] // 2
                         distance = fish_center_y - bar_center_y
