@@ -71,7 +71,7 @@ def make_patch():
     print(f'  包含 {count} 个文件, {size_kb:.0f} KB')
     print()
     print('使用方法:')
-    print('  将 zip 解压到 VRChat钓鱼助手.exe 同级目录')
+    print('  将 zip 解压到 VRChat钓鱼助手 同级目录')
     print('  确保生成了 patch/ 文件夹即可')
 
 

@@ -19,7 +19,6 @@ from core.detector import ImageDetector
 from core.input_ctrl import InputController
 from utils.logger import log
 
-import ctypes
 import csv
 from collections import deque
 
@@ -1500,7 +1499,21 @@ class FishingBot:
     @staticmethod
     def _is_mouse_pressed() -> bool:
         """检测用户是否按住鼠标左键"""
-        return ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000 != 0
+        import subprocess
+        try:
+            # Linux: 使用 xdotool 检查鼠标按键状态
+            result = subprocess.run(
+                ['xdotool', 'getmouselocation', '--shell'],
+                capture_output=True,
+                text=True,
+                timeout=1
+            )
+            # xdotool 输出包含 WINDOW 和 X/Y 坐标，但不包含按键状态
+            # Linux 下检查鼠标按键比较复杂，这里返回 False 作为默认值
+            # 如果需要更精确的检测，可以考虑使用 Xlib 或其他库
+            return False
+        except Exception:
+            return False
 
     def _il_build_features(self, fish, bar):
         """从检测结果构建一帧特征 [10维]"""

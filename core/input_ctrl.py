@@ -1,31 +1,17 @@
 """
 输入控制模块
 ============
-PostMessage — Win32 消息投递, 不移动光标不抢焦点。
-摇头功能通过 VRChat OSC API 发送 LookLeft/LookRight。
+使用 X11/XTest 进行鼠标控制 + OSC 摇头
 """
 
-import ctypes
-import ctypes.wintypes
+import subprocess
 import time
 
 from utils.logger import log
 
-user32 = ctypes.windll.user32
-
-WM_LBUTTONDOWN  = 0x0201
-WM_LBUTTONUP    = 0x0202
-WM_ACTIVATE     = 0x0006
-WA_ACTIVE       = 1
-MK_LBUTTON      = 0x0001
-
-
-def _MAKELPARAM(x: int, y: int) -> int:
-    return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-
 
 class InputController:
-    """PostMessage 鼠标控制器 + OSC 摇头"""
+    """XTest 鼠标控制器 + OSC 摇头"""
 
     def __init__(self, window_mgr):
         self.wm = window_mgr
@@ -38,15 +24,52 @@ class InputController:
     def _update_click_pos(self):
         region = self.wm.get_region()
         if region:
-            self._click_x = region[2] // 2
-            self._click_y = region[3] // 2
+            self._click_x = region[0] + region[2] // 2
+            self._click_y = region[1] + region[3] // 2
 
-    def _post(self, msg: int, wparam: int):
-        hwnd = self.wm.hwnd
-        if not hwnd:
-            return False
-        lparam = _MAKELPARAM(self._click_x, self._click_y)
-        return bool(user32.PostMessageW(hwnd, msg, wparam, lparam))
+    def _mouse_move(self, x, y):
+        """移动鼠标到指定位置"""
+        try:
+            subprocess.run(
+                ['xdotool', 'mousemove', str(int(x)), str(int(y))],
+                capture_output=True,
+                timeout=1
+            )
+        except Exception as e:
+            log.warning(f"移动鼠标失败: {e}")
+
+    def _mouse_click(self, button=1):
+        """鼠标点击"""
+        try:
+            subprocess.run(
+                ['xdotool', 'click', str(button)],
+                capture_output=True,
+                timeout=1
+            )
+        except Exception as e:
+            log.warning(f"鼠标点击失败: {e}")
+
+    def _mouse_down(self, button=1):
+        """鼠标按下"""
+        try:
+            subprocess.run(
+                ['xdotool', 'mousedown', str(button)],
+                capture_output=True,
+                timeout=1
+            )
+        except Exception as e:
+            log.warning(f"鼠标按下失败: {e}")
+
+    def _mouse_up(self, button=1):
+        """鼠标松开"""
+        try:
+            subprocess.run(
+                ['xdotool', 'mouseup', str(button)],
+                capture_output=True,
+                timeout=1
+            )
+        except Exception as e:
+            log.warning(f"鼠标松开失败: {e}")
 
     # ────────────────── 聚焦 ──────────────────
 
@@ -59,35 +82,44 @@ class InputController:
         return ok
 
     def move_to_game_center(self):
+        """移动鼠标到游戏窗口中心"""
         self._update_click_pos()
+        self._mouse_move(self._click_x, self._click_y)
 
     def ensure_cursor_in_game(self):
-        pass
+        """确保鼠标在游戏窗口内"""
+        region = self.wm.get_region()
+        if region:
+            # 简单检查：将鼠标移到窗口中心
+            self._update_click_pos()
+            self._mouse_move(self._click_x, self._click_y)
 
     # ────────────────── 鼠标操作 ──────────────────
 
     def click(self, focus: bool = False):
+        """点击鼠标"""
         if focus:
             self.focus_game()
             time.sleep(0.1)
         self._update_click_pos()
-        self._post(WM_LBUTTONDOWN, MK_LBUTTON)
-        time.sleep(0.06)
-        self._post(WM_LBUTTONUP, 0)
+        self._mouse_move(self._click_x, self._click_y)
+        time.sleep(0.05)
+        self._mouse_click(1)
 
     def click_rapid(self):
-        self._post(WM_LBUTTONDOWN, MK_LBUTTON)
-        time.sleep(0.02)
-        self._post(WM_LBUTTONUP, 0)
+        """快速点击"""
+        self._mouse_click(1)
 
     def mouse_down(self):
+        """按下鼠标"""
         if not self.mouse_is_down:
-            self._post(WM_LBUTTONDOWN, MK_LBUTTON)
+            self._mouse_down(1)
             self.mouse_is_down = True
 
     def mouse_up(self):
+        """松开鼠标"""
         if self.mouse_is_down:
-            self._post(WM_LBUTTONUP, 0)
+            self._mouse_up(1)
             self.mouse_is_down = False
 
     # ────────────────── 摇头 (OSC) ──────────────────
@@ -119,8 +151,10 @@ class InputController:
     # ────────────────── 安全 ──────────────────
 
     def safe_release(self):
+        """安全释放鼠标"""
         try:
-            self._post(WM_LBUTTONUP, 0)
+            if self.mouse_is_down:
+                self._mouse_up(1)
         except Exception:
             pass
         self.mouse_is_down = False

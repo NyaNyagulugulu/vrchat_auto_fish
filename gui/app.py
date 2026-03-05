@@ -514,11 +514,11 @@ class FishingApp:
         if self.bot.running:
             return
 
-        if self._has_non_ascii(config.BASE_DIR):
-            self._log_msg("[错误] 程序所在路径包含中文或特殊字符，会导致图片/模型加载失败！")
-            self._log_msg(f"  当前路径: {config.BASE_DIR}")
-            self._log_msg("  请将程序移动到纯英文路径下再运行，例如: D:\\fish")
-            return
+        # if self._has_non_ascii(config.BASE_DIR):
+        #     self._log_msg("[错误] 程序所在路径包含中文或特殊字符，会导致图片/模型加载失败！")
+        #     self._log_msg(f"  当前路径: {config.BASE_DIR}")
+        #     self._log_msg("  请将程序移动到纯英文路径下再运行，例如: /home/neko")
+        #     return
 
         # 先尝试连接窗口
         if not self.bot.window.is_valid():
