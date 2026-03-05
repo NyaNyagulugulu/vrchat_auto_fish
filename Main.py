@@ -319,14 +319,35 @@ class FishAutoBot:
             print(f"点击出错: {e}")
 
     def detect_white_bar(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """检测白色条的位置 - 使用模板匹配"""
+        """检测白色条的位置 - 使用模板匹配 + 严格的白色过滤"""
         try:
             if not self.bar_templates:
                 print("  未加载白色条模板，使用边缘检测")
                 return self._detect_white_bar_by_edges(frame)
 
+            # 转换为HSV颜色空间
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+            # 宽松的白色范围（检测更多白色区域）
+            # H: 0-180 (白色没有色相限制)
+            # S: 0-60 (饱和度范围放宽)
+            # V: 180-255 (亮度范围放宽)
+            lower_white = np.array([0, 0, 180])
+            upper_white = np.array([180, 60, 255])
+
+            # 创建白色掩码
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+
+            # 对掩码进行形态学操作，去除小噪点
+            kernel = np.ones((3, 3), np.uint8)
+            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
+            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
+
+            # 将掩码应用到原始图像，只保留白色区域
+            frame_white = cv2.bitwise_and(frame, frame, mask=white_mask)
+
             # 转换为灰度并应用伽马校正
-            frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+            frame_gray = to_grayscale_with_gamma(frame_white, gamma=1.5)
 
             # 对每个白色条模板进行匹配
             best_match = None
@@ -357,6 +378,16 @@ class FishAutoBot:
             if best_match and best_score >= threshold:
                 x, y, w, h = best_match
                 
+                # 验证：检查该区域是否真的是白色
+                roi = hsv[y:y+h, x:x+w]
+                # 计算ROI中白色像素的比例
+                white_ratio = np.sum(white_mask[y:y+h, x:x+w] > 0) / (w * h)
+                
+                # 只有当白色像素比例超过60%时才认为是白色条（降低要求）
+                if white_ratio < 0.6:
+                    print(f"  [验证失败] 白色像素比例: {white_ratio:.2%} < 60%")
+                    return None
+                
                 # 使用卡尔曼滤波平滑位置
                 center_x = x + w // 2
                 center_y = y + h // 2
@@ -376,7 +407,7 @@ class FishAutoBot:
                 filtered_x = int(filtered_x - w // 2)
                 filtered_y = int(filtered_y - h // 2)
 
-                print(f"  检测到白色条（模板匹配）: x={filtered_x}, y={filtered_y}, w={w}, h={h}, 分数={best_score:.3f}")
+                print(f"  检测到白色条（模板匹配+白色验证）: x={filtered_x}, y={filtered_y}, w={w}, h={h}, 分数={best_score:.3f}, 白色比例={white_ratio:.2%}")
                 return (filtered_x, filtered_y, w, h)
 
             print(f"  未检测到白色条（模板匹配），最佳匹配分数: {best_score:.3f}")
@@ -386,44 +417,59 @@ class FishAutoBot:
             return None
 
     def _detect_white_bar_by_edges(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """备用方法：使用边缘检测白色条"""
+        """备用方法：使用边缘检测白色条 + 严格的白色过滤"""
         try:
-            # 转换为灰度并应用伽马校正
-            gray = to_grayscale_with_gamma(frame, gamma=1.5)
+            # 转换为HSV颜色空间
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-            # 二值化 - 提取白色区域（高亮度）- 降低阈值使其更容易检测
-            _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+            # 宽松的白色范围
+            lower_white = np.array([0, 0, 180])
+            upper_white = np.array([180, 60, 255])
+
+            # 创建白色掩码
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+
+            # 对掩码进行形态学操作，去除小噪点
+            kernel = np.ones((3, 3), np.uint8)
+            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
+            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
 
             # 搜索整个屏幕（放宽搜索区域）
-            frame_height = gray.shape[0]
+            frame_height = frame.shape[0]
             search_region_y_start = int(frame_height * 0.1)  # 从10%高度开始
             search_region_y_end = int(frame_height * 0.7)    # 到70%高度结束
-            search_region = binary[search_region_y_start:search_region_y_end, :]
+            search_region = white_mask[search_region_y_start:search_region_y_end, :]
 
             # 查找轮廓
             contours, _ = cv2.findContours(search_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             # 找到最大的白色区域（白色条）
             if contours:
-                # 筛选符合条件的轮廓（宽度大、高度小）
+                # 筛选符合条件的轮廓
                 valid_contours = []
                 for contour in contours:
                     x, y, w, h = cv2.boundingRect(contour)
                     # 调整y坐标到原始图像
                     y = y + search_region_y_start
                     
-                    # 放宽宽度范围（钓鱼白色条通常在屏幕宽度的20%-80%）
-                    frame_width = gray.shape[1]
-                    min_width = int(frame_width * 0.2)
-                    max_width = int(frame_width * 0.8)
-                    
-                    # 放宽高度范围（1-15像素）
-                    if min_width < w < max_width and 1 < h < 15:
-                        valid_contours.append((contour, (x, y, w, h)))
+                    # 检查轮廓的宽高比
+                    # 竖直白色条：高度 > 宽度
+                    if h > w * 2:  # 高度至少是宽度的2倍
+                        # 限制宽度范围（钓鱼白色条通常很窄）
+                        if 5 < w < 30:  # 宽度在5-30像素之间
+                            # 限制高度范围
+                            if 50 < h < 200:  # 高度在50-200像素之间
+                                # 检查该区域的白色像素比例
+                                roi = hsv[y:y+h, x:x+w]
+                                white_ratio = np.sum(white_mask[y:y+h, x:x+w] > 0) / (w * h)
+                                
+                                # 只有当白色像素比例超过65%时才认为是白色条（降低要求）
+                                if white_ratio > 0.65:
+                                    valid_contours.append((contour, (x, y, w, h), white_ratio))
 
                 if valid_contours:
-                    # 选择面积最大的
-                    largest_contour, (x, y, w, h) = max(valid_contours, key=lambda c: cv2.contourArea(c[0]))
+                    # 选择白色像素比例最高的
+                    largest_contour, (x, y, w, h), white_ratio = max(valid_contours, key=lambda c: c[2])
 
                     # 使用卡尔曼滤波平滑位置
                     center_x = x + w // 2
@@ -444,10 +490,10 @@ class FishAutoBot:
                     filtered_x = int(filtered_x - w // 2)
                     filtered_y = int(filtered_y - h // 2)
 
-                    print(f"  检测到白色条: x={filtered_x}, y={filtered_y}, w={w}, h={h}")
+                    print(f"  检测到白色条（边缘检测+白色验证）: x={filtered_x}, y={filtered_y}, w={w}, h={h}, 白色比例={white_ratio:.2%}")
                     return (filtered_x, filtered_y, w, h)
 
-            print("  未检测到白色条")
+            print("  未检测到白色条（边缘检测）")
             return None
         except Exception as e:
             print(f"检测白色条出错: {e}")
@@ -489,7 +535,7 @@ class FishAutoBot:
             # 对每个小鱼模板进行匹配
             best_match = None
             best_score = 0
-            threshold = 0.25  # 进一步降低阈值
+            threshold = 0.15  # 进一步降低阈值，更容易检测到小鱼
 
             for template in self.fish_templates:
                 # 对模板也进行边缘检测
