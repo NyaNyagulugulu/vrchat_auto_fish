@@ -136,7 +136,7 @@ class FishAutoBot:
 
         best_match = None
         best_score = 0
-        threshold = 0.2  # 降低阈值
+        threshold = 0.4  # 提高阈值，减少误检测
         state_scores = {}
 
         frame_height, frame_width = frame_gray.shape[:2]
@@ -219,32 +219,27 @@ class FishAutoBot:
                 self.expected_state = 2  # 下一个预期状态
 
             elif state == 2:
-                # 图2：等待（过渡状态）
-                print("  状态2: 正在钓鱼 - 等待...")
+                # 图2：白色点出现后，左键点击（上钩）
+                print("  状态2: 鱼上钩 - 收杆！")
+                self.click_left()
                 self.expected_state = 3  # 下一个预期状态
 
             elif state == 3:
-                # 图3：白色点出现后，左键点击
-                print("  状态3: 鱼上钩 - 收杆！")
-                self.click_left()
+                # 图3：控制白色条保持在小鱼图片内
+                print("  状态3: 正在收线 - 控制白条位置")
+                self.state_start_time = current_time
                 self.expected_state = 4  # 下一个预期状态
 
             elif state == 4:
-                # 图4：控制白色条保持在小鱼图片内
-                print("  状态4: 正在收线 - 控制白条位置")
-                self.state_start_time = current_time
-                self.expected_state = 5  # 下一个预期状态
-
-            elif state == 5:
-                # 图5：等待1秒后左键点击，循环
-                print("  状态5: 鱼钓上 - 等待1秒...")
+                # 图4：等待1秒后左键点击，循环
+                print("  状态4: 鱼钓上 - 等待1秒...")
                 time.sleep(1)
                 self.click_left()
                 print("  循环开始...")
                 self.expected_state = 1  # 循环回状态1
 
-        elif state == 4 and self.expected_state == 4:
-            # 状态4需要持续控制白色条位置 - 智能控制
+        elif state == 3 and self.expected_state == 3:
+            # 状态3需要持续控制白色条位置 - 智能控制
             if current_time - self.state_start_time > 0.05:  # 更快的响应速度
                 # 检测白色条和小鱼位置
                 bar_pos = self.detect_white_bar(frame)
@@ -275,7 +270,7 @@ class FishAutoBot:
 
                     # 自动截图学习（降低频率，避免太多截图）
                     if int(current_time) % 2 == 0:  # 每2秒截图一次
-                        self.auto_capture(frame, 4)
+                        self.auto_capture(frame, 3)
                 else:
                     # 无法检测到目标，使用默认策略
                     print("  无法检测目标 - 使用默认策略")
@@ -312,11 +307,17 @@ class FishAutoBot:
             # 转换为灰度并应用伽马校正
             gray = to_grayscale_with_gamma(frame, gamma=1.5)
 
-            # 二值化 - 提取白色区域（高亮度）
-            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            # 二值化 - 提取白色区域（高亮度）- 降低阈值使其更容易检测
+            _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+
+            # 搜索整个屏幕（放宽搜索区域）
+            frame_height = gray.shape[0]
+            search_region_y_start = int(frame_height * 0.1)  # 从10%高度开始
+            search_region_y_end = int(frame_height * 0.7)    # 到70%高度结束
+            search_region = binary[search_region_y_start:search_region_y_end, :]
 
             # 查找轮廓
-            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(search_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             # 找到最大的白色区域（白色条）
             if contours:
@@ -324,7 +325,16 @@ class FishAutoBot:
                 valid_contours = []
                 for contour in contours:
                     x, y, w, h = cv2.boundingRect(contour)
-                    if w > 200 and h < 10:
+                    # 调整y坐标到原始图像
+                    y = y + search_region_y_start
+                    
+                    # 放宽宽度范围（钓鱼白色条通常在屏幕宽度的20%-80%）
+                    frame_width = gray.shape[1]
+                    min_width = int(frame_width * 0.2)
+                    max_width = int(frame_width * 0.8)
+                    
+                    # 放宽高度范围（1-15像素）
+                    if min_width < w < max_width and 1 < h < 15:
                         valid_contours.append((contour, (x, y, w, h)))
 
                 if valid_contours:
@@ -360,56 +370,104 @@ class FishAutoBot:
             return None
 
     def detect_fish(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        """检测小鱼的位置 - 使用灰度+伽马校正的模板匹配"""
-        try:
-            if not self.fish_templates:
-                print("  未加载小鱼模板，无法检测")
-                return None
 
-            # 转换为灰度并应用伽马校正
-            frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+            """检测小鱼的位置 - 使用灰度+伽马校正的模板匹配"""
 
-            best_match = None
+            try:
 
-            best_score = 0
+                if not self.fish_templates:
 
-            threshold = 0.2  # 降低阈值
+                    print("  未加载小鱼模板，无法检测")
 
-            frame_height, frame_width = frame_gray.shape[:2]
+                    return None
 
-            # 对每个小鱼模板进行匹配
-            for template in self.fish_templates:
-                template_height, template_width = template.shape[:2]
+    
 
-                # 检查是否是小模板（小于窗口的70%）
-                is_small_template = (template_height < frame_height * 0.7 and 
-                                    template_width < frame_width * 0.7)
+                # 转换为灰度并应用伽马校正
 
-                if is_small_template:
+                frame_gray = to_grayscale_with_gamma(frame, gamma=1.5)
+
+    
+
+                best_match = None
+
+    
+
+                best_score = 0
+
+    
+
+                threshold = 0.4  # 降低阈值，更容易检测到小鱼
+
+    
+
+                frame_height, frame_width = frame_gray.shape[:2]
+
+    
+
+                # 对每个小鱼模板进行匹配
+
+                for template in self.fish_templates:
+
+                    template_height, template_width = template.shape[:2]
+
+    
+
+                    # 跳过大于图像的模板
+
+                    if template_height > frame_height or template_width > frame_width:
+
+                        continue
+
+    
+
                     # 小模板：在整个窗口中搜索
+
                     result = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+
                     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
 
+    
+
                     # 检查最佳匹配位置是否合理（不在边缘）
+
                     x, y = max_loc
+
                     margin = 10
+
                     if (x > margin and x < frame_width - template_width - margin and
+
                         y > margin and y < frame_height - template_height - margin):
+
                         if max_val > best_score:
+
                             best_score = max_val
+
                             best_match = (x, y, template_width, template_height)
 
-            if best_match and best_score >= threshold:
-                x, y, w, h = best_match
-                print(f"  检测到小鱼: x={x}, y={y}, w={w}, h={h}, 匹配分数={best_score:.3f}")
-                return (x, y, w, h)
-            else:
-                print(f"  未检测到小鱼，最佳匹配分数: {best_score:.3f}")
-                return None
+    
 
-        except Exception as e:
-            print(f"检测小鱼出错: {e}")
-            return None
+                if best_match and best_score >= threshold:
+
+                    x, y, w, h = best_match
+
+                    print(f"  检测到小鱼: x={x}, y={y}, w={w}, h={h}, 匹配分数={best_score:.3f}")
+
+                    return (x, y, w, h)
+
+                else:
+
+                    print(f"  未检测到小鱼，最佳匹配分数: {best_score:.3f}")
+
+                    return None
+
+    
+
+            except Exception as e:
+
+                print(f"检测小鱼出错: {e}")
+
+                return None
 
     def is_fish_aligned(self, fish_pos: Tuple[int, int, int, int], bar_pos: Tuple[int, int, int, int]) -> bool:
         """判断小鱼是否在白色条区域内"""
@@ -494,6 +552,11 @@ class X11WindowCapture:
             if result.returncode != 0:
                 return False
 
+            # 检查窗口是否被隐藏或最小化
+            if 'IsUnMapped' in result.stdout or 'IsViewable' not in result.stdout:
+                print(f"[调试] 窗口可能被隐藏或最小化")
+                return False
+
             # 解析窗口几何信息
             x = y = width = height = 0
 
@@ -559,6 +622,16 @@ class X11WindowCapture:
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
+            # 添加调试信息
+            if frame is None or frame.size == 0:
+                print(f"[调试] 捕获的帧为空")
+                return None
+
+            # 检查是否全黑
+            if np.mean(frame) < 10:
+                print(f"[调试] 捕获的帧几乎全黑 (平均值: {np.mean(frame):.2f})")
+                print(f"[调试] 窗口位置: x={x}, y={y}, w={width}, h={height}")
+
             return frame
 
         except Exception as e:
@@ -615,6 +688,12 @@ def main():
                 # 创建用于绘制的副本（彩色图）
                 display_frame = frame.copy()
 
+                # 添加测试框（右上角红色框，验证绘制功能）
+                cv2.rectangle(display_frame, (display_frame.shape[1] - 60, 10), 
+                             (display_frame.shape[1] - 10, 60), (0, 0, 255), 4)
+                cv2.putText(display_frame, "TEST", (display_frame.shape[1] - 55, 45), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
                 # 检测当前状态
                 state = fish_bot.detect_state(frame)
 
@@ -627,19 +706,31 @@ def main():
                     fish_pos = fish_bot.detect_fish(frame)
                     if fish_pos:
                         x, y, w, h = fish_pos
-                        # 绘制小鱼边界框（绿色）
-                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                        cv2.putText(display_frame, "FISH", (x, y - 10), 
+                        # 绘制小鱼边界框（绿色）- 加粗线条
+                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 4)
+                        cv2.putText(display_frame, "FISH", (x, y - 15), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 3)
+                        print(f"  [绘制] 小鱼框: x={x}, y={y}, w={w}, h={h}")
+                    else:
+                        # 即使未检测到也显示提示
+                        cv2.putText(display_frame, "FISH: NOT FOUND", (10, 70), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        print(f"  [未绘制] 小鱼未检测到")
 
                     # 检测白色条
                     bar_pos = fish_bot.detect_white_bar(frame)
                     if bar_pos:
                         x, y, w, h = bar_pos
-                        # 绘制白色条边界框（蓝色）
-                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
-                        cv2.putText(display_frame, "BAR", (x, y - 10), 
+                        # 绘制白色条边界框（蓝色）- 加粗线条
+                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 0, 0), 4)
+                        cv2.putText(display_frame, "BAR", (x, y - 15), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 3)
+                        print(f"  [绘制] 白色条框: x={x}, y={y}, w={w}, h={h}")
+                    else:
+                        # 即使未检测到也显示提示
+                        cv2.putText(display_frame, "BAR: NOT FOUND", (10, 95), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                        print(f"  [未绘制] 白色条未检测到")
 
                     # 状态4时绘制相对位置
                     if state == 4 and fish_pos and bar_pos:
